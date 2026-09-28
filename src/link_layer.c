@@ -17,49 +17,50 @@
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and send a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
+// ----------------------------------------------------
+// This example code shows how to open the serial port and send a string.
+// TODO: Adapt and extend this code according to the specifications of the project.
+// ----------------------------------------------------
 
-    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
-    {
-        perror("openSerialPort");
-        return -1;
-    }
-
-    printf("Serial port %s opened\n", llParameters.serialPort);
-
-    // Create string to send
-    unsigned char buf[BUF_SIZE] = {0};
-
-    for (int i = 0; i < BUF_SIZE; i++)
-    {
-        buf[i] = 'a' + i % 26;
-    }
-
-    // In non-canonical mode, '\n' does not end the writing.
-    // Test this condition by placing a '\n' in the middle of the buffer.
-    // The whole buffer must be sent even with the '\n'.
-    buf[5] = '\n';
-
-    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-    printf("%d bytes written to serial port\n", bytes);
-
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
-
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
-
-    printf("Serial port %s closed\n", llParameters.serialPort);
-
-    return 0;
+if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
+{
+perror("openSerialPort");
+return -1;
 }
+
+printf("Serial port %s opened\n", llParameters.serialPort);
+
+// Create string to send
+unsigned char buf[BUF_SIZE] = {0};
+
+
+buf[0] = 0X7E;
+buf[1] = 0X03;
+buf[2] = 0X03;
+buf[3]= buf[1]^buf[2];
+buf[4]= 0X7E;
+
+// In non-canonical mode, '\n' does not end the writing.
+// Test this condition by placing a '\n' in the middle of the buffer.
+// The whole buffer must be sent even with the '\n'.
+int bytes = writeBytesSerialPort(buf, BUF_SIZE);
+printf("%d bytes written to serial port\n", bytes);
+
+// Wait until all bytes have been written to the serial port
+sleep(1);
+
+// Close serial port
+if (closeSerialPort() < 0)
+{
+perror("closeSerialPort");
+return -1;
+}
+
+printf("Serial port %s closed\n", llParameters.serialPort);
+
+return 0;
+}
+
 
 int llOpenRx(LinkLayer llParameters)
 {
@@ -86,22 +87,30 @@ int llOpenRx(LinkLayer llParameters)
     int nBytesBuf = 0;
 
     while (STOP == FALSE)
-    {
-        // Read one byte from serial port.
-        // NOTE: You must check how many bytes were actually read by reading the return value.
-        // In this example, we assume that the byte is always read, which may not be true.
-        unsigned char byte;
-        int bytes = readByteSerialPort(&byte);
-        nBytesBuf += bytes;
+{
+// Read one byte from serial port.
+// NOTE: You must check how many bytes were actually read by reading the return value.
+// In this example, we assume that the byte is always read, which may not be true.
+unsigned char byte;
+int bytes = readByteSerialPort(&byte);
+nBytesBuf += bytes;
 
-        printf("Byte received: %c\n", byte);
+printf("Byte received: %c\n", byte);
 
-        if (byte == 'z')
-        {
-            printf("Received 'z' char. Stop reading from serial port.\n");
-            STOP = TRUE;
-        }
-    }
+if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 3){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
+if(nBytesBuf==5)
+{
+if(byte == 0X7E){
+printf("Received 5 bytes. Stop reading from serial port.\n");
+STOP = TRUE;
+}
+}
+
+}
+
 
     printf("Total bytes received: %d\n", nBytesBuf);
 
