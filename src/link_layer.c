@@ -7,10 +7,23 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <signal.h>
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
+int alarmEnabled = FALSE;
+int alarmCount= 0;
+
+void alarmHandler(int signal)
+{
+    alarmEnabled = FALSE;
+    alarmCount++;
+
+    printf("Alarm #%d received\n", alarmCount);
+}
+
 
 ////////////////////////////////////////////////
 // LLOPEN
@@ -43,18 +56,36 @@ buf[4]= 0X7E;
 // In non-canonical mode, '\n' does not end the writing.
 // Test this condition by placing a '\n' in the middle of the buffer.
 // The whole buffer must be sent even with the '\n'.
-int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-printf("%d bytes written to serial port\n", bytes);
+
+
+struct sigaction act = {0};
+act.sa_handler = &alarmHandler;
+if (sigaction(SIGALRM, &act, NULL) == -1){
+    perror("sigaction");
+    exit(1);
+}
+
+printf("Alarm configured\n");
+
 
 volatile int STOP = FALSE;
 int nBytesBuf = 0;
-while (STOP == FALSE)
+while (STOP == FALSE && alarmCount<4 )
 {
+  if (alarmEnabled == FALSE)
+        {
+            alarm(3); // Set alarm to be triggered in 3s
+            alarmEnabled = TRUE;
+        }  
+//escrevo
+int bytes = writeBytesSerialPort(buf, BUF_SIZE);
+printf("%d bytes written to serial port\n", bytes);
+
 // Read one byte from serial port.
 // NOTE: You must check how many bytes were actually read by reading the return value.
 // In this example, we assume that the byte is always read, which may not be true.
 unsigned char byte;
-int bytes = readByteSerialPort(&byte);
+bytes = readByteSerialPort(&byte);
 nBytesBuf += bytes;
 
 printf("Byte received: 0%02X\n", byte) ; 
