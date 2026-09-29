@@ -12,10 +12,45 @@
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
-#define BUF_SIZE 256
+#define BUF_SIZE 5
 int alarmEnabled = FALSE;
 int alarmCount= 0;
 
+//maquinadeestados
+
+int maquinadeestados(){
+
+	volatile int STOP = FALSE;
+	int nBytesBuf = 0;
+    //paro de tentar ler apenas quando o alarm acabar e for reposto.
+    while (STOP==FALSE && alarmEnabled==TRUE){
+        unsigned char byte;
+        int bytes = readByteSerialPort(&byte);
+       if (bytes==0){continue;}
+        nBytesBuf += bytes;
+
+        printf("Byte received: 0x%02X\n", byte) ; 
+
+        if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
+        if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+        
+        if(nBytesBuf == 3){ if(byte == 0X07){continue;}else{STOP=TRUE;}}
+        if(nBytesBuf == 4){ if(byte == (0x03 ^0X07)){continue;}else{STOP=TRUE;}}
+        if(nBytesBuf==5)
+        {
+        if(byte == 0X7E){
+        printf("Received 5 bytes. Stop reading from serial port.\n");
+        return 0;
+
+        } 
+        STOP=TRUE;
+        }
+
+	}
+	return 1;
+}
+
+//alarmhandler
 void alarmHandler(int signal)
 {
     alarmEnabled = FALSE;
@@ -68,41 +103,26 @@ if (sigaction(SIGALRM, &act, NULL) == -1){
 printf("Alarm configured\n");
 
 
-volatile int STOP = FALSE;
-int nBytesBuf = 0;
-while (STOP == FALSE && alarmCount<4 )
-{
+while (alarmCount<4 )
+{ 
+  int bytes=0;
   if (alarmEnabled == FALSE)
         {
             alarm(3); // Set alarm to be triggered in 3s
             alarmEnabled = TRUE;
+            //escrevo uma vez por alarme
+            bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            printf("%d bytes written to serial port\n", bytes);
         }  
-//escrevo
-int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-printf("%d bytes written to serial port\n", bytes);
-
-// Read one byte from serial port.
-// NOTE: You must check how many bytes were actually read by reading the return value.
-// In this example, we assume that the byte is always read, which may not be true.
-unsigned char byte;
-bytes = readByteSerialPort(&byte);
-nBytesBuf += bytes;
-
-printf("Byte received: 0%02X\n", byte) ; 
-
-if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 3){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
-if(nBytesBuf==5)
-{
-if(byte == 0X7E){
-printf("Received 5 bytes. Stop reading from serial port.\n");
-STOP = TRUE;
-}
-}
+    
+    if (maquinadeestados()==0){
+        break;
+    }
+    
 
 }
+
+
 // Wait until all bytes have been written to the serial port
 sleep(1);
 
