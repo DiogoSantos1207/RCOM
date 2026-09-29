@@ -46,6 +46,32 @@ buf[4]= 0X7E;
 int bytes = writeBytesSerialPort(buf, BUF_SIZE);
 printf("%d bytes written to serial port\n", bytes);
 
+volatile int STOP = FALSE;
+int nBytesBuf = 0;
+while (STOP == FALSE)
+{
+// Read one byte from serial port.
+// NOTE: You must check how many bytes were actually read by reading the return value.
+// In this example, we assume that the byte is always read, which may not be true.
+unsigned char byte;
+int bytes = readByteSerialPort(&byte);
+nBytesBuf += bytes;
+
+printf("Byte received: 0%02X\n", byte);
+
+if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 3){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
+if(nBytesBuf==5)
+{
+if(byte == 0X7E){
+printf("Received 5 bytes. Stop reading from serial port.\n");
+STOP = TRUE;
+}
+}
+
+}
 // Wait until all bytes have been written to the serial port
 sleep(1);
 
@@ -95,7 +121,7 @@ unsigned char byte;
 int bytes = readByteSerialPort(&byte);
 nBytesBuf += bytes;
 
-printf("Byte received: 0%02X\n", byte);
+printf("Byte received: %c\n", byte);
 
 if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
 if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
@@ -110,26 +136,9 @@ STOP = TRUE;
 }
 
 }
-printf("Total bytes received: %d\n", nBytesBuf);
-
-// Create string to send
-unsigned char buf[BUF_SIZE] = {0};
 
 
-buf[0] = 0X7E;
-buf[1] = 0X03;
-buf[2] = 0X03;
-buf[3]= buf[1]^buf[2];
-buf[4]= 0X7E;
-
-// In non-canonical mode, '\n' does not end the writing.
-// Test this condition by placing a '\n' in the middle of the buffer.
-// The whole buffer must be sent even with the '\n'.
-int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-printf("%d bytes written to serial port\n", bytes);
-
-// Wait until all bytes have been written to the serial port
-sleep(1);
+    printf("Total bytes received: %d\n", nBytesBuf);
 
     // Close serial port
     if (closeSerialPort() < 0)
