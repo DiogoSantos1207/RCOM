@@ -95,7 +95,7 @@ unsigned char byte;
 int bytes = readByteSerialPort(&byte);
 nBytesBuf += bytes;
 
-printf("Byte received: %c\n", byte);
+printf("Byte received: 0%02X\n", byte);
 
 if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
 if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
