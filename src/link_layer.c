@@ -110,9 +110,26 @@ STOP = TRUE;
 }
 
 }
+printf("Total bytes received: %d\n", nBytesBuf);
+
+// Create string to send
+unsigned char buf[BUF_SIZE] = {0};
 
 
-    printf("Total bytes received: %d\n", nBytesBuf);
+buf[0] = 0X7E;
+buf[1] = 0X03;
+buf[2] = 0X03;
+buf[3]= buf[1]^buf[2];
+buf[4]= 0X7E;
+
+// In non-canonical mode, '\n' does not end the writing.
+// Test this condition by placing a '\n' in the middle of the buffer.
+// The whole buffer must be sent even with the '\n'.
+int bytes = writeBytesSerialPort(buf, BUF_SIZE);
+printf("%d bytes written to serial port\n", bytes);
+
+// Wait until all bytes have been written to the serial port
+sleep(1);
 
     // Close serial port
     if (closeSerialPort() < 0)
