@@ -18,37 +18,126 @@ int alarmCount= 0;
 
 //maquinadeestados
 
-int maquinadeestados(){
+int maquinadeestados()
+{
+    enum State
+    {
+        START,
+        FLAG_RCV,
+        A_RCV,
+        C_RCV,
+        BCC_RCV,
+        STOP
+    };
 
-	volatile int STOP = FALSE;
-	int nBytesBuf = 0;
-    //paro de tentar ler apenas quando o alarm acabar e for reposto.
-    while (STOP==FALSE && alarmEnabled==TRUE){
-        unsigned char byte;
+    enum State state = START;
+
+    unsigned char byte;
+
+    while (state != STOP && alarmEnabled == TRUE)
+    {
         int bytes = readByteSerialPort(&byte);
-       if (bytes==0){continue;}
-        nBytesBuf += bytes;
 
-        printf("Byte received: 0x%02X\n", byte) ; 
+        if (bytes == 0)
+            continue;
 
-        if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-        
-        if(nBytesBuf == 3){ if(byte == 0X07){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 4){ if(byte == (0x03 ^0X07)){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf==5)
+        printf("Byte received: 0x%02X\n", byte);
+
+        switch (state)
         {
-        if(byte == 0X7E){
-        printf("Received 5 bytes. Stop reading from serial port.\n");
-        return 0;
+            case START:
 
-        } 
-        STOP=TRUE;
+                if (byte == 0x7E)
+                {
+                    state = FLAG_RCV;
+                }
+
+                break;
+
+
+            case FLAG_RCV:
+
+                if (byte == 0x03)
+                {
+                    state = A_RCV;
+                }
+                else if (byte == 0x7E)
+                {
+                    // Another FLAG, remain here
+                    state = FLAG_RCV;
+                }
+                else
+                {
+                    state = START;
+                }
+
+                break;
+
+
+            case A_RCV:
+
+                if (byte == 0x03)
+                {
+                    state = C_RCV;
+                }
+                else if (byte == 0x7E)
+                {
+                    state = FLAG_RCV;
+                }
+                else
+                {
+                    state = START;
+                }
+
+                break;
+
+
+            case C_RCV:
+
+                if (byte == (0x03 ^ 0x03))
+                {
+                    state = BCC_RCV;
+                }
+                else if (byte == 0x7E)
+                {
+                    state = FLAG_RCV;
+                }
+                else
+                {
+                    state = START;
+                }
+
+                break;
+
+            case BCC_RCV:
+
+                if (byte == 0x7E)
+                { 
+                    state = STOP;
+                }
+                else
+                {
+                    state = START;
+                }
+
+                break;
+
+
+
+            case STOP:
+                break;
         }
+    }
 
-	}
-	return 1;
+    if (state == STOP)
+    {
+        printf("SET received correctly.\n");
+        return 0;
+    }
+
+    return 1;
 }
+
 
 //alarmhandler
 void alarmHandler(int signal)
@@ -58,6 +147,91 @@ void alarmHandler(int signal)
 
     printf("Alarm #%d received\n", alarmCount);
 }
+int receiveUA()
+{
+    enum State
+    {
+        START,
+        FLAG_RCV,
+        A_RCV,
+        C_RCV,
+        BCC_RCV,
+        STOP
+    };
+
+    enum State state = START;
+
+    unsigned char byte;
+
+    while (state != STOP && alarmEnabled == TRUE)
+    {
+        int bytes = readByteSerialPort(&byte);
+
+        if (bytes < 0)
+        {
+            perror("readByteSerialPort");
+            return -1;
+        }
+
+        if (bytes == 0)
+            continue;
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        switch (state)
+        {
+        case START:
+            if (byte == 0x7E)
+                state = FLAG_RCV;
+            break;
+
+        case FLAG_RCV:
+            if (byte == 0x03)
+                state = A_RCV;
+            else if (byte == 0x7E)
+                state = FLAG_RCV;
+            else
+                state = START;
+            break;
+
+        case A_RCV:
+            if (byte == 0x07)
+                state = C_RCV;
+            else if (byte == 0x7E)
+                state = FLAG_RCV;
+            else
+                state = START;
+            break;
+
+        case C_RCV:
+            if (byte == (0x03 ^ 0x07))
+                state = BCC_RCV;
+            else if (byte == 0x7E)
+                state = FLAG_RCV;
+            else
+                state = START;
+            break;
+
+        case BCC_RCV:
+            if (byte == 0x7E)
+                state = STOP;
+            else
+                state = START;
+            break;
+
+        case STOP:
+            break;
+        }
+    }
+
+    if (state == STOP)
+    {
+        printf("UA received correctly.\n");
+        return 0;
+    }
+
+    return 1;
+}
 
 
 ////////////////////////////////////////////////
@@ -65,87 +239,6 @@ void alarmHandler(int signal)
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-// ----------------------------------------------------
-// This example code shows how to open the serial port and send a string.
-// TODO: Adapt and extend this code according to the specifications of the project.
-// ----------------------------------------------------
-
-if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
-{
-perror("openSerialPort");
-return -1;
-}
-
-printf("Serial port %s opened\n", llParameters.serialPort);
-
-// Create string to send
-unsigned char buf[BUF_SIZE] = {0};
-
-
-buf[0] = 0X7E;
-buf[1] = 0X03;
-buf[2] = 0X03;
-buf[3]= buf[1]^buf[2];
-buf[4]= 0X7E;
-
-// In non-canonical mode, '\n' does not end the writing.
-// Test this condition by placing a '\n' in the middle of the buffer.
-// The whole buffer must be sent even with the '\n'.
-
-
-struct sigaction act = {0};
-act.sa_handler = &alarmHandler;
-if (sigaction(SIGALRM, &act, NULL) == -1){
-    perror("sigaction");
-    exit(1);
-}
-
-printf("Alarm configured\n");
-
-
-while (alarmCount<4 )
-{ 
-  int bytes=0;
-  if (alarmEnabled == FALSE)
-        {
-            alarm(3); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
-            //escrevo uma vez por alarme
-            bytes = writeBytesSerialPort(buf, BUF_SIZE);
-            printf("%d bytes written to serial port\n", bytes);
-        }  
-    
-    if (maquinadeestados()==0){
-        break;
-    }
-    
-
-}
-
-
-// Wait until all bytes have been written to the serial port
-sleep(1);
-
-// Close serial port
-if (closeSerialPort() < 0)
-{
-perror("closeSerialPort");
-return -1;
-}
-
-printf("Serial port %s closed\n", llParameters.serialPort);
-
-return 0;
-}
-
-
-int llOpenRx(LinkLayer llParameters)
-{
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and receive a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -154,42 +247,232 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
+    // SET frame
+    unsigned char buf[5];
 
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
+    buf[0] = 0x7E;
+    buf[1] = 0x03;
+    buf[2] = 0x03;
+    buf[3] = buf[1] ^ buf[2];
+    buf[4] = 0x7E;
 
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
-    volatile int STOP = FALSE;
-    int nBytesBuf = 0;
+    // Configure alarm handler
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
 
-    while (STOP == FALSE)
+    if (sigaction(SIGALRM, &act, NULL) == -1)
+    {
+        perror("sigaction");
+        closeSerialPort();
+        return -1;
+    }
+
+    alarmEnabled = FALSE;
+    alarmCount = 0;
+
+    int tries = 0;
+    int success = FALSE;
+
+    while (tries < llParameters.nRetransmissions)
+    {
+        printf("Sending SET (attempt %d/%d)\n",
+               tries + 1,
+               llParameters.nRetransmissions);
+
+        // Send SET
+        int bytes = writeBytesSerialPort(buf, 5);
+
+        if (bytes != 5)
+        {
+            perror("writeBytesSerialPort");
+            closeSerialPort();
+            return -1;
+        }
+
+        tries++;
+
+        // Start timeout
+        alarmEnabled = TRUE;
+        alarm(llParameters.timeout);
+
+        // Wait for UA
+        if (receiveUA() == 0)
+        {
+            // UA received -> cancel alarm
+            alarm(0);
+            alarmEnabled = FALSE;
+
+            success = TRUE;
+            break;
+        }
+
+        // Timeout -> prepare retransmission
+        alarm(0);
+        alarmEnabled = FALSE;
+    }
+
+    if (success)
+    {
+        printf("Connection established successfully.\n");
+    }
+    else
+    {
+        printf("Failed to establish connection.\n");
+    }
+
+    if (closeSerialPort() < 0)
+    {
+        perror("closeSerialPort");
+        return -1;
+    }
+
+    printf("Serial port %s closed\n", llParameters.serialPort);
+
+    return success ? 0 : -1;
+}
+
+int llOpenRx(LinkLayer llParameters)
 {
-// Read one byte from serial port.
-// NOTE: You must check how many bytes were actually read by reading the return value.
-// In this example, we assume that the byte is always read, which may not be true.
-unsigned char byte;
-int bytes = readByteSerialPort(&byte);
-nBytesBuf += bytes;
+    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
+    {
+        perror("openSerialPort");
+        return -1;
+    }
 
-printf("Byte received: %c\n", byte);
+    printf("Serial port %s opened\n", llParameters.serialPort);
 
-if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 3){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
-if(nBytesBuf==5)
-{
-if(byte == 0X7E){
-printf("Received 5 bytes. Stop reading from serial port.\n");
-STOP = TRUE;
-}
-}
+    enum State
+    {
+        START,
+        FLAG_RCV,
+        A_RCV,
+        C_RCV,
+        BCC_RCV,
+        STOP
+    };
 
-}
+    enum State state = START;
 
+    unsigned char byte;
 
-    printf("Total bytes received: %d\n", nBytesBuf);
+    while (state != STOP)
+    {
+        int bytes = readByteSerialPort(&byte);
+
+        if (bytes < 0)
+        {
+            perror("readByteSerialPort");
+            closeSerialPort();
+            return -1;
+        }
+
+        if (bytes == 0)
+            continue;
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        switch (state)
+        {
+        case START:
+
+            if (byte == 0x7E)
+            {
+                state = FLAG_RCV;
+            }
+
+            break;
+
+        case FLAG_RCV:
+
+            if (byte == 0x03)
+            {
+                state = A_RCV;
+            }
+            else if (byte == 0x7E)
+            {
+                state = FLAG_RCV;
+            }
+            else
+            {
+                state = START;
+            }
+
+            break;
+
+        case A_RCV:
+
+            if (byte == 0x03)
+            {
+                state = C_RCV;
+            }
+            else if (byte == 0x7E)
+            {
+                state = FLAG_RCV;
+            }
+            else
+            {
+                state = START;
+            }
+
+            break;
+
+        case C_RCV:
+
+            if (byte == (0x03 ^ 0x03))
+            {
+                state = BCC_RCV;
+            }
+            else if (byte == 0x7E)
+            {
+                state = FLAG_RCV;
+            }
+            else
+            {
+                state = START;
+            }
+
+            break;
+
+        case BCC_RCV:
+
+            if (byte == 0x7E)
+            {
+                state = STOP;
+            }
+            else
+            {
+                state = START;
+            }
+
+            break;
+
+        case STOP:
+            break;
+        }
+    }
+
+    printf("SET received correctly.\n");
+
+    // UA frame
+    unsigned char ua[5];
+
+    ua[0] = 0x7E;
+    ua[1] = 0x03;
+    ua[2] = 0x07;
+    ua[3] = ua[1] ^ ua[2];
+    ua[4] = 0x7E;
+
+    // Send UA
+    int bytes = writeBytesSerialPort(ua, 5);
+
+    if (bytes != 5)
+    {
+        perror("writeBytesSerialPort");
+        closeSerialPort();
+        return -1;
+    }
+
+    printf("UA sent correctly.\n");
 
     // Close serial port
     if (closeSerialPort() < 0)
