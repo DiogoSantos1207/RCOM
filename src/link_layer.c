@@ -32,10 +32,10 @@ int maquinadeestados(){
         printf("Byte received: 0x%02X\n", byte) ; 
 
         if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
+        if(nBytesBuf == 2){ if(byte == 0X01){continue;}else{STOP=TRUE;}}
         
         if(nBytesBuf == 3){ if(byte == 0X07){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 4){ if(byte == (0x03 ^0X07)){continue;}else{STOP=TRUE;}}
+        if(nBytesBuf == 4){ if(byte == (0x01 ^0X07)){continue;}else{STOP=TRUE;}}
         if(nBytesBuf==5)
         {
         if(byte == 0X7E){
@@ -116,6 +116,7 @@ while (alarmCount<4 )
         }  
     
     if (maquinadeestados()==0){
+        alarm(0);
         break;
     }
     
@@ -170,9 +171,10 @@ int llOpenRx(LinkLayer llParameters)
 // In this example, we assume that the byte is always read, which may not be true.
 unsigned char byte;
 int bytes = readByteSerialPort(&byte);
+if (bytes==0)continue;
 nBytesBuf += bytes;
 
-printf("Byte received: %c\n", byte);
+printf("Byte received: 0x%02X\n", byte) ; 
 
 if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
 if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
@@ -181,8 +183,21 @@ if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
 if(nBytesBuf==5)
 {
 if(byte == 0X7E){
-printf("Received 5 bytes. Stop reading from serial port.\n");
-STOP = TRUE;
+    //received SET frame, Has to send UA
+    printf("Received 5 bytes. Will send UA. Stop reading from serial port.\n");
+
+    // Create string to send
+    unsigned char buf[BUF_SIZE] = {0};
+
+    buf[0] = 0X7E;
+    buf[1] = 0X01;
+    buf[2] = 0X07;
+    buf[3]= buf[1]^buf[2];
+    buf[4]= 0X7E;
+
+    bytes = writeBytesSerialPort(buf, BUF_SIZE);
+    printf("%d bytes written to serial port\n", bytes);
+    STOP = TRUE;
 }
 }
 
