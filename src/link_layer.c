@@ -16,8 +16,10 @@
 int alarmEnabled = FALSE;
 int alarmCount= 0;
 
-//maquinadeestados
+//N(s)
+static int module_counter=0;
 
+//maquinadeestados
 int maquinadeestados(){
 
 	volatile int STOP = FALSE;
@@ -117,7 +119,7 @@ while (alarmCount<4 )
     
     if (maquinadeestados()==0){
         alarm(0);
-        break;
+        return 0; 
     }
     
 
@@ -136,7 +138,7 @@ return -1;
 
 printf("Serial port %s closed\n", llParameters.serialPort);
 
-return 0;
+return -1;
 }
 
 
@@ -221,12 +223,70 @@ if(byte == 0X7E){
 ////////////////////////////////////////////////
 // LLSEND
 ////////////////////////////////////////////////
+
 int llSend(const unsigned char *buf, int bufSize)
 {
     // TODO: Implement this function
+    //create frame with size 0, we dinamically increase it
+    int frame_size=0;
+    unsigned char frame[2*MAX_PAYLOAD_SIZE + 7];
+    //calculate bcc2 first
+    unsigned char bcc2=0x00;
+    for (int i=0; i<bufSize; i++){
+        bcc2^=buf[i];
+    }
+    //add flags to frame
+    frame[0]=0x7E;
+    frame[1]=0x03;
+    if (module_counter==0){frame[2]=0x00;}else frame[2]=0x80;
+    frame[3]=frame[1]^frame[2];
+    frame_size= 4;
+
+    //stuff data
+    for (int i=0; i<bufSize; i++){
+        if (buf[i]==0x7E){
+            frame[frame_size]=0x7D;
+            frame_size++;
+            frame[frame_size]=0x5E;
+            frame_size++;
+        }
+        else if (buf[i]==0x7D){
+            frame[frame_size]=0x7D;
+            frame_size++;
+            frame[frame_size]=0x5D;
+            frame_size++;
+        }
+        else{
+            frame[frame_size]=buf[i];
+            frame_size++;
+        }
+    }
+
+    //add bcc2
+    if(bcc2==0x7D){
+        frame[frame_size]=0x7d;
+        frame_size++;
+        frame[frame_size]=0x5D;
+        frame_size++;
+    }
+    else if (bcc2==0x7E){
+        frame[frame_size]=0x7d;
+        frame_size++;
+        frame[frame_size]=0x5E;
+        frame_size++;
+
+    }
+    else{
+        frame[frame_size]= bcc2;
+        frame_size++;
+    }
+    //flag final
+    frame[frame_size]= 0x7E;
+       
 
     return 0;
 }
+
 
 ////////////////////////////////////////////////
 // LLRECEIVE
