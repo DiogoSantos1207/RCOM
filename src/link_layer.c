@@ -209,16 +209,6 @@ int llOpenRx(LinkLayer llParameters)
     bytes = writeBytesSerialPort(buf, BUF_SIZE);
     printf("%d bytes written to serial port\n", bytes);
 
-
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
-
-    printf("Serial port %s closed\n", llParameters.serialPort);
-
     return 0;
 }
 
@@ -328,11 +318,118 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 // LLRECEIVE
 ////////////////////////////////////////////////
+static int rx_expected = 0;
+
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function
+    typedef enum { R_START, R_FLAG, R_A, R_C, R_BCC1, R_DATA, R_DONE } EstadoR;
+    EstadoR estado = R_START;
 
-    return 0;
+    unsigned char byte;
+    unsigned char C = 0;
+    int escaped = 0;
+    int size = 0;
+
+    //resposta esperada depende do N(s) que esperamos receber
+    unsigned char rr_ok, rr_dup, rej;
+    if (rx_expected == 0) { rr_ok = 0xAB; rr_dup = 0xAA; rej = 0x54; }
+    else                  { rr_ok = 0xAA; rr_dup = 0xAB; rej = 0x55; }
+
+    while (estado != R_DONE) {
+        if (readByteSerialPort(&byte) <= 0) continue;
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        if (estado == R_START) {
+            if (byte == 0x7E) estado = R_FLAG;
+        }
+        else if (estado == R_FLAG) {
+            if (byte == 0x03) estado = R_A;
+            else if (byte != 0x7E) estado = R_START;
+        }
+        else if (estado == R_A) {
+            //guardamos o C para saber se e I0 ou I1
+            C = byte;
+            if (C == 0x00 || C == 0x80) estado = R_C;
+            else if (byte == 0x7E) estado = R_FLAG;
+            else estado = R_START;
+        }
+        else if (estado == R_C) {
+            if (byte == (0x03 ^ C)) {
+                //header ok, comecamos a ler dados
+                estado = R_DATA;
+                size = 0;
+                escaped = 0;
+            }
+            else if (byte == 0x7E) estado = R_FLAG;
+            else estado = R_START;
+        }
+        else if (estado == R_DATA) {
+            if (byte == 0x7E) {
+                //fim de frame, o ultimo byte guardado e o BCC2
+                if (size == 0) { estado = R_START; continue; }
+
+                unsigned char bcc2_recv = packet[size - 1];
+                int dataLen = size - 1;
+
+                unsigned char bcc2_calc = 0x00;
+                for (int i = 0; i < dataLen; i++) bcc2_calc ^= packet[i];
+
+                unsigned char Ns;
+                if (C == 0x00) Ns = 0;
+                else Ns = 1;
+
+                //montamos a resposta inline
+                unsigned char reply[5];
+                reply[0] = 0x7E;
+                reply[1] = 0x03;
+                reply[4] = 0x7E;
+
+                if (bcc2_calc != bcc2_recv) {
+                    //erro no campo de dados
+                    if (Ns == rx_expected) reply[2] = rej;
+                    else reply[2] = rr_dup;
+                    reply[3] = reply[1] ^ reply[2];
+                    writeBytesSerialPort(reply, 5);
+                    estado = R_START;
+                }
+                else {
+                    //dados ok
+                    if (Ns == rx_expected) {
+                        reply[2] = rr_ok;
+                        reply[3] = reply[1] ^ reply[2];
+                        writeBytesSerialPort(reply, 5);
+                        //alteramos o rx_expected para a proxima frame
+                        if (rx_expected == 1) rx_expected--;
+                        else rx_expected++;
+                        return dataLen;
+                    }
+                    else {
+                        //duplicado sem erro, confirma mas descarta
+                        reply[2] = rr_dup;
+                        reply[3] = reply[1] ^ reply[2];
+                        writeBytesSerialPort(reply, 5);
+                        estado = R_START;
+                    }
+                }
+            }
+            else if (byte == 0x7D) {
+                escaped = 1;
+            }
+            else {
+                if (escaped) {
+                    if (byte == 0x5E) packet[size] = 0x7E;
+                    else if (byte == 0x5D) packet[size] = 0x7D;
+                    else packet[size] = byte;
+                    escaped = 0;
+                }
+                else packet[size] = byte;
+                size++;
+            }
+        }
+    }
+
+    return -1;
 }
 
 ////////////////////////////////////////////////
@@ -340,14 +437,95 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: Implement this function
+    //monta DISC (A=0x03, C=0x0B)
+    unsigned char buf[BUF_SIZE] = {0};
+    buf[0] = 0x7E;
+    buf[1] = 0x03;
+    buf[2] = 0x0B;
+    buf[3] = buf[1] ^ buf[2];
+    buf[4] = 0x7E;
 
-    return 0;
+    alarmEnabled = FALSE;
+    alarmCount = 0;
+
+    while (alarmCount < tx_nRetransmissions)
+    {
+        int bytes = 0;
+        if (alarmEnabled == FALSE)
+        {
+            alarm(tx_timeout);
+            alarmEnabled = TRUE;
+            bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            printf("%d bytes written to serial port\n", bytes);
+        }
+
+        //esperamos DISC do receiver (A=0x01, C=0x0B)
+        if (maquinadeestados(0x01, TRUE) == 0x0B)
+        {
+            alarm(0);
+
+            //respondemos com UA (A=0x01, C=0x07)
+            unsigned char ua[BUF_SIZE] = {0};
+            ua[0] = 0x7E;
+            ua[1] = 0x01;
+            ua[2] = 0x07;
+            ua[3] = ua[1] ^ ua[2];
+            ua[4] = 0x7E;
+            writeBytesSerialPort(ua, BUF_SIZE);
+
+            if (closeSerialPort() < 0)
+            {
+                perror("closeSerialPort");
+                return -1;
+            }
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 int llCloseRx()
 {
-    // TODO: Implement this function
+    //esperamos DISC do transmitter (A=0x03, C=0x0B)
+    while (1) {
+        if (maquinadeestados(0x03, FALSE) == 0x0B) break;
+    }
 
-    return 0;
+    //monta DISC proprio (A=0x01, C=0x0B)
+    unsigned char buf[BUF_SIZE] = {0};
+    buf[0] = 0x7E;
+    buf[1] = 0x01;
+    buf[2] = 0x0B;
+    buf[3] = buf[1] ^ buf[2];
+    buf[4] = 0x7E;
+
+    alarmEnabled = FALSE;
+    alarmCount = 0;
+
+    while (alarmCount < tx_nRetransmissions)
+    {
+        int bytes = 0;
+        if (alarmEnabled == FALSE)
+        {
+            alarm(tx_timeout);
+            alarmEnabled = TRUE;
+            bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            printf("%d bytes written to serial port\n", bytes);
+        }
+
+        //esperamos UA (A=0x01, C=0x07)
+        if (maquinadeestados(0x01, TRUE) == 0x07)
+        {
+            alarm(0);
+            if (closeSerialPort() < 0)
+            {
+                perror("closeSerialPort");
+                return -1;
+            }
+            return 0;
+        }
+    }
+
+    return -1;
 }
