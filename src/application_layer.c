@@ -7,14 +7,251 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
+//C para control packets
+#define C_START 1
+#define C_DATA  2
+#define C_END   3
+
+//T para TLV
+#define T_SIZE 0
+#define T_NAME 1
+
+//tamanho maximo do fragmento do ficheiro dentro de um data packet
+//MAX_PAYLOAD_SIZE menos os 3 bytes do header do data packet (C, L2, L1)
+#define MAX_CHUNK (MAX_PAYLOAD_SIZE - 3)
+
+////////////////////////////////////////////////
+// TX
+////////////////////////////////////////////////
+static int sendControlPacket(unsigned char c, long fileSize, const char *filename)
+{
+    //montamos o packet dinamicamente
+    unsigned char packet[MAX_PAYLOAD_SIZE];
+    int packet_size = 0;
+
+    //primeiro byte e o control
+    packet[0] = c;
+    packet_size = 1;
+
+    //TLV do tamanho do ficheiro
+    //calculamos quantos bytes sao necessarios para representar fileSize
+    unsigned char sizeBytes[8];
+    int nSizeBytes = 0;
+    long tmp = fileSize;
+    //caso especial: ficheiro vazio ainda precisa de 1 byte
+    if (tmp == 0) {
+        sizeBytes[0] = 0x00;
+        nSizeBytes = 1;
+    }
+    else {
+        //guardamos em little endian para depois invertermos
+        while (tmp > 0) {
+            sizeBytes[nSizeBytes] = (unsigned char)(tmp & 0xFF);
+            nSizeBytes++;
+            tmp >>= 8;
+        }
+    }
+
+    packet[packet_size] = T_SIZE;
+    packet_size++;
+    packet[packet_size] = (unsigned char)nSizeBytes;
+    packet_size++;
+    //invertemos para ficar em big endian (byte mais significativo primeiro)
+    for (int i = nSizeBytes - 1; i >= 0; i--) {
+        packet[packet_size] = sizeBytes[i];
+        packet_size++;
+    }
+
+    //TLV do nome do ficheiro
+    int nameLen = (int)strlen(filename);
+    packet[packet_size] = T_NAME;
+    packet_size++;
+    packet[packet_size] = (unsigned char)nameLen;
+    packet_size++;
+    for (int i = 0; i < nameLen; i++) {
+        packet[packet_size] = (unsigned char)filename[i];
+        packet_size++;
+    }
+
+    //enviamos atraves do link layer
+    if (llSend(packet, packet_size) < 0) return -1;
+    return 0;
+}
+
+static int sendDataPacket(const unsigned char *data, int dataSize)
+{
+    //montamos o data packet: C | L2 | L1 | data
+    unsigned char packet[MAX_PAYLOAD_SIZE];
+    packet[0] = C_DATA;
+    //K = 256 * L2 + L1
+    packet[1] = (unsigned char)((dataSize >> 8) & 0xFF);
+    packet[2] = (unsigned char)(dataSize & 0xFF);
+    for (int i = 0; i < dataSize; i++) {
+        packet[3 + i] = data[i];
+    }
+
+    if (llSend(packet, dataSize + 3) < 0) return -1;
+    return 0;
+}
+
+static int runTx(const char *filename)
+{
+    //abrimos o ficheiro em modo binario
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) {
+        perror("fopen");
+        return -1;
+    }
+
+    //descobrimos o tamanho do ficheiro
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    printf("File %s has %ld bytes\n", filename, fileSize);
+
+    //enviamos o start packet
+    if (sendControlPacket(C_START, fileSize, filename) < 0) {
+        printf("Error sending START\n");
+        fclose(file);
+        return -1;
+    }
+    printf("START sent\n");
+
+    //loop para ler fragmentos e enviar data packets
+    unsigned char chunk[MAX_CHUNK];
+    long bytesSent = 0;
+    while (bytesSent < fileSize) {
+        int toRead = MAX_CHUNK;
+        if (fileSize - bytesSent < MAX_CHUNK) toRead = (int)(fileSize - bytesSent);
+
+        int read = (int)fread(chunk, 1, toRead, file);
+        if (read <= 0) {
+            printf("Error reading file\n");
+            fclose(file);
+            return -1;
+        }
+
+        if (sendDataPacket(chunk, read) < 0) {
+            printf("Error sending DATA\n");
+            fclose(file);
+            return -1;
+        }
+        bytesSent += read;
+        printf("DATA sent (%d bytes, total %ld/%ld)\n", read, bytesSent, fileSize);
+    }
+
+    //enviamos o end packet (mesma info do start)
+    if (sendControlPacket(C_END, fileSize, filename) < 0) {
+        printf("Error sending END\n");
+        fclose(file);
+        return -1;
+    }
+    printf("END sent\n");
+
+    fclose(file);
+    return 0;
+}
+
+////////////////////////////////////////////////
+// RX
+////////////////////////////////////////////////
+static int parseControlPacket(const unsigned char *packet, int size, long *fileSize, char *filename)
+{
+    //primeiro byte e o control, saltamos
+    int i = 1;
+    while (i < size) {
+        unsigned char t = packet[i];
+        i++;
+        unsigned char l = packet[i];
+        i++;
+
+        if (t == T_SIZE) {
+            //montamos o inteiro byte a byte (big endian)
+            long value = 0;
+            for (int j = 0; j < l; j++) {
+                value = (value << 8) | packet[i + j];
+            }
+            *fileSize = value;
+        }
+        else if (t == T_NAME) {
+            for (int j = 0; j < l; j++) {
+                filename[j] = (char)packet[i + j];
+            }
+            filename[l] = '\0';
+        }
+        //se aparecer um T desconhecido ignoramos mas avancamos na mesma
+        i += l;
+    }
+    return 0;
+}
+
+static int runRx(const char *filename)
+{
+    //+1 byte para o llReceive escrever o BCC2 no fim (usa como scratch)
+    unsigned char packet[MAX_PAYLOAD_SIZE + 1];
+
+    //esperamos o START
+    int size = llReceive(packet);
+    if (size < 0 || packet[0] != C_START) {
+        printf("Error: did not receive START\n");
+        return -1;
+    }
+
+    long fileSize = 0;
+    char receivedName[256] = {0};
+    parseControlPacket(packet, size, &fileSize, receivedName);
+    printf("START received: file %s with %ld bytes\n", receivedName, fileSize);
+
+    //abrimos o ficheiro de destino com o nome passado ao receiver
+    FILE *file = fopen(filename, "wb");
+    if (file == NULL) {
+        perror("fopen");
+        return -1;
+    }
+
+    //loop ate ao END
+    long bytesReceived = 0;
+    while (1) {
+        size = llReceive(packet);
+        if (size < 0) {
+            printf("Error in llReceive\n");
+            fclose(file);
+            return -1;
+        }
+
+        if (packet[0] == C_DATA) {
+            //K = 256 * L2 + L1
+            int k = packet[1] * 256 + packet[2];
+            fwrite(packet + 3, 1, k, file);
+            bytesReceived += k;
+            printf("DATA received (%d bytes, total %ld/%ld)\n", k, bytesReceived, fileSize);
+        }
+        else if (packet[0] == C_END) {
+            printf("END received\n");
+            //validamos que o tamanho recebido bate certo
+            long endSize = 0;
+            char endName[256] = {0};
+            parseControlPacket(packet, size, &endSize, endName);
+            if (endSize != fileSize) {
+                printf("Warning: END size (%ld) does not match START size (%ld)\n", endSize, fileSize);
+            }
+            break;
+        }
+        //packets desconhecidos sao ignorados
+    }
+
+    fclose(file);
+    return 0;
+}
+
+////////////////////////////////////////////////
+// MAIN
+////////////////////////////////////////////////
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)
 {
-    // ----------------------------------------------------
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     LinkLayer llParameters = {
         .baudRate = baudRate,
         .nRetransmissions = nTries,
@@ -24,11 +261,39 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
     if (strcmp(role, "tx") == 0)
     {
-        llOpenTx(llParameters);
+        if (llOpenTx(llParameters) < 0) {
+            printf("llOpenTx failed\n");
+            return;
+        }
+        printf("Connection established (Tx)\n");
+
+        if (runTx(filename) < 0) {
+            printf("Transfer failed\n");
+        }
+
+        if (llCloseTx() < 0) {
+            printf("llCloseTx failed\n");
+            return;
+        }
+        printf("Connection closed (Tx)\n");
     }
     else if (strcmp(role, "rx") == 0)
     {
-        llOpenRx(llParameters);
+        if (llOpenRx(llParameters) < 0) {
+            printf("llOpenRx failed\n");
+            return;
+        }
+        printf("Connection established (Rx)\n");
+
+        if (runRx(filename) < 0) {
+            printf("Reception failed\n");
+        }
+
+        if (llCloseRx() < 0) {
+            printf("llCloseRx failed\n");
+            return;
+        }
+        printf("Connection closed (Rx)\n");
     }
     else
     {
