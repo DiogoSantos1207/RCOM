@@ -9,12 +9,63 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <time.h>
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 5
 int alarmEnabled = FALSE;
 int alarmCount= 0;
+
+//estatisticas do protocolo (impressas no llCloseTx/llCloseRx)
+//indices: 0=I, 1=SET, 2=DISC, 3=UA, 4=RR, 5=REJ
+static int stat_sent[6] = {0};
+static int stat_recv[6] = {0};
+static int stat_retransmissions = 0;
+static int stat_timeouts = 0;
+static int stat_rejs_received = 0;
+static int stat_rejs_sent = 0;
+static int stat_duplicates = 0;
+static long stat_bytes = 0;
+static struct timespec stat_start;
+
+static const char *stat_names[6] = {"I", "SET", "DISC", "UA", "RR", "REJ"};
+
+static void stats_reset(void) {
+    for (int i = 0; i < 6; i++) { stat_sent[i] = 0; stat_recv[i] = 0; }
+    stat_retransmissions = 0;
+    stat_timeouts = 0;
+    stat_rejs_received = 0;
+    stat_rejs_sent = 0;
+    stat_duplicates = 0;
+    stat_bytes = 0;
+    clock_gettime(CLOCK_MONOTONIC, &stat_start);
+}
+
+static void stats_print(const char *role) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - stat_start.tv_sec)
+                   + (now.tv_nsec - stat_start.tv_nsec) / 1e9;
+
+    printf("\n========== Protocol statistics (%s) ==========\n", role);
+    printf("Elapsed time:        %.3f s\n", elapsed);
+    printf("Bytes transferred:   %ld\n", stat_bytes);
+    if (elapsed > 0)
+        printf("Throughput:          %.2f byte/s\n", stat_bytes / elapsed);
+    printf("Frames sent:         ");
+    for (int i = 0; i < 6; i++) printf("%s=%d ", stat_names[i], stat_sent[i]);
+    printf("\n");
+    printf("Frames received:     ");
+    for (int i = 0; i < 6; i++) printf("%s=%d ", stat_names[i], stat_recv[i]);
+    printf("\n");
+    printf("Timeouts:            %d\n", stat_timeouts);
+    printf("Retransmissions:     %d\n", stat_retransmissions);
+    printf("REJ received (Tx):   %d\n", stat_rejs_received);
+    printf("REJ sent (Rx):       %d\n", stat_rejs_sent);
+    printf("Duplicates detected: %d\n", stat_duplicates);
+    printf("================================================\n\n");
+}
 
 //N(s)
 static int module_counter=0;
@@ -72,6 +123,7 @@ void alarmHandler(int signal)
 {
     alarmEnabled = FALSE;
     alarmCount++;
+    stat_timeouts++;
 
     printf("Alarm #%d received\n", alarmCount);
 }
@@ -96,6 +148,8 @@ return -1;
 //guardamos para usar no llSend/llCloseTx
 tx_timeout = llParameters.timeout;
 tx_nRetransmissions = llParameters.nRetransmissions;
+
+stats_reset();
 
 printf("Serial port %s opened\n", llParameters.serialPort);
 
@@ -133,12 +187,15 @@ while (alarmCount<tx_nRetransmissions)
             alarmEnabled = TRUE;
             //escrevo uma vez por alarme
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            stat_sent[1]++; //SET
+            if (alarmCount > 0) stat_retransmissions++;
             printf("%d bytes written to serial port\n", bytes);
         }
 
     //0x03->reply do receiver, True->estamos a usar alarme, 0x07->control byte do UA
     if (maquinadeestados(0x03, TRUE)==0x07){
         alarm(0);
+        stat_recv[3]++; //UA
         return 0;
     }
 
@@ -175,6 +232,11 @@ int llOpenRx(LinkLayer llParameters)
         return -1;
     }
 
+    tx_timeout = llParameters.timeout;
+    tx_nRetransmissions = llParameters.nRetransmissions;
+
+    stats_reset();
+
     printf("Serial port %s opened\n", llParameters.serialPort);
 
     // Read from serial port until the 'z' char is received.
@@ -189,7 +251,7 @@ int llOpenRx(LinkLayer llParameters)
     // In this example, we assume that the byte is always read, which may not be true.
 
     while (1){
-    if (maquinadeestados(0x03, FALSE)==0x03) break;
+    if (maquinadeestados(0x03, FALSE)==0x03) { stat_recv[1]++; break; } //SET
     }
 
 
@@ -207,6 +269,7 @@ int llOpenRx(LinkLayer llParameters)
     buf[4]= 0X7E;
     int bytes;
     bytes = writeBytesSerialPort(buf, BUF_SIZE);
+    stat_sent[3]++; //UA
     printf("%d bytes written to serial port\n", bytes);
 
     return 0;
@@ -284,12 +347,16 @@ int llSend(const unsigned char *buf, int bufSize)
     else { rr_ok=0xAA; rej_me=0x55; }
 
     //vamos tentar envia-lo nRetransmissions vezes
+    int attempts = 0;
     while (alarmCount<tx_nRetransmissions){
         int bytes=0;
         if (alarmEnabled==FALSE){
             alarm(tx_timeout);
             alarmEnabled=TRUE;
             bytes = writeBytesSerialPort(frame, frame_size);
+            stat_sent[0]++; //I
+            if (attempts > 0) stat_retransmissions++;
+            attempts++;
             printf("%d bytes written to serial port\n", bytes);
         }
 
@@ -297,6 +364,8 @@ int llSend(const unsigned char *buf, int bufSize)
 
         if (c == rr_ok){
             alarm(0);
+            stat_recv[4]++; //RR
+            stat_bytes += bufSize;
             //ja recebemos a resposta certa, agora alteramos o module para o proximo i frame
             if (module_counter==1){module_counter--;}
             else {module_counter++;}
@@ -306,6 +375,8 @@ int llSend(const unsigned char *buf, int bufSize)
         //nao gastamos tentativa aqui mas convem perguntar a professora
         else if (c == rej_me){
             alarm(0);
+            stat_recv[5]++; //REJ
+            stat_rejs_received++;
             alarmEnabled = FALSE;
         }
     }
@@ -385,10 +456,19 @@ int llReceive(unsigned char *packet)
                 reply[1] = 0x03;
                 reply[4] = 0x7E;
 
+                stat_recv[0]++; //I
                 if (bcc2_calc != bcc2_recv) {
                     //erro no campo de dados
-                    if (Ns == rx_expected) reply[2] = rej;
-                    else reply[2] = rr_dup;
+                    if (Ns == rx_expected) {
+                        reply[2] = rej;
+                        stat_sent[5]++; //REJ
+                        stat_rejs_sent++;
+                    }
+                    else {
+                        reply[2] = rr_dup;
+                        stat_sent[4]++; //RR
+                        stat_duplicates++;
+                    }
                     reply[3] = reply[1] ^ reply[2];
                     writeBytesSerialPort(reply, 5);
                     estado = R_START;
@@ -399,6 +479,8 @@ int llReceive(unsigned char *packet)
                         reply[2] = rr_ok;
                         reply[3] = reply[1] ^ reply[2];
                         writeBytesSerialPort(reply, 5);
+                        stat_sent[4]++; //RR
+                        stat_bytes += dataLen;
                         //alteramos o rx_expected para a proxima frame
                         if (rx_expected == 1) rx_expected--;
                         else rx_expected++;
@@ -409,6 +491,8 @@ int llReceive(unsigned char *packet)
                         reply[2] = rr_dup;
                         reply[3] = reply[1] ^ reply[2];
                         writeBytesSerialPort(reply, 5);
+                        stat_sent[4]++; //RR
+                        stat_duplicates++;
                         estado = R_START;
                     }
                 }
@@ -447,6 +531,7 @@ int llCloseTx()
 
     alarmEnabled = FALSE;
     alarmCount = 0;
+    int attempts = 0;
 
     while (alarmCount < tx_nRetransmissions)
     {
@@ -456,6 +541,9 @@ int llCloseTx()
             alarm(tx_timeout);
             alarmEnabled = TRUE;
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            stat_sent[2]++; //DISC
+            if (attempts > 0) stat_retransmissions++;
+            attempts++;
             printf("%d bytes written to serial port\n", bytes);
         }
 
@@ -463,6 +551,7 @@ int llCloseTx()
         if (maquinadeestados(0x01, TRUE) == 0x0B)
         {
             alarm(0);
+            stat_recv[2]++; //DISC
 
             //respondemos com UA (A=0x01, C=0x07)
             unsigned char ua[BUF_SIZE] = {0};
@@ -472,6 +561,9 @@ int llCloseTx()
             ua[3] = ua[1] ^ ua[2];
             ua[4] = 0x7E;
             writeBytesSerialPort(ua, BUF_SIZE);
+            stat_sent[3]++; //UA
+
+            stats_print("Tx");
 
             if (closeSerialPort() < 0)
             {
@@ -482,6 +574,7 @@ int llCloseTx()
         }
     }
 
+    stats_print("Tx");
     return -1;
 }
 
@@ -489,7 +582,7 @@ int llCloseRx()
 {
     //esperamos DISC do transmitter (A=0x03, C=0x0B)
     while (1) {
-        if (maquinadeestados(0x03, FALSE) == 0x0B) break;
+        if (maquinadeestados(0x03, FALSE) == 0x0B) { stat_recv[2]++; break; } //DISC
     }
 
     //monta DISC proprio (A=0x01, C=0x0B)
@@ -502,6 +595,7 @@ int llCloseRx()
 
     alarmEnabled = FALSE;
     alarmCount = 0;
+    int attempts = 0;
 
     while (alarmCount < tx_nRetransmissions)
     {
@@ -511,6 +605,9 @@ int llCloseRx()
             alarm(tx_timeout);
             alarmEnabled = TRUE;
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
+            stat_sent[2]++; //DISC
+            if (attempts > 0) stat_retransmissions++;
+            attempts++;
             printf("%d bytes written to serial port\n", bytes);
         }
 
@@ -518,6 +615,10 @@ int llCloseRx()
         if (maquinadeestados(0x01, TRUE) == 0x07)
         {
             alarm(0);
+            stat_recv[3]++; //UA
+
+            stats_print("Rx");
+
             if (closeSerialPort() < 0)
             {
                 perror("closeSerialPort");
@@ -527,5 +628,6 @@ int llCloseRx()
         }
     }
 
+    stats_print("Rx");
     return -1;
 }
