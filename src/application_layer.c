@@ -189,8 +189,9 @@ static int parseControlPacket(const unsigned char *packet, int size, long *fileS
 
 static int runRx(const char *filename)
 {
-    //+1 byte para o llReceive escrever o BCC2 no fim (usa como scratch)
-    unsigned char packet[MAX_PAYLOAD_SIZE + 1];
+    //o llReceive copia apenas o payload para este buffer (sem BCC2),
+    //portanto MAX_PAYLOAD_SIZE chega
+    unsigned char packet[MAX_PAYLOAD_SIZE];
 
     //esperamos o START
     int size = llReceive(packet);
@@ -224,18 +225,37 @@ static int runRx(const char *filename)
         if (packet[0] == C_DATA) {
             //K = 256 * L2 + L1
             int k = packet[1] * 256 + packet[2];
+            //validacao de integridade: o K declarado tem de bater certo com o
+            //tamanho real do packet. O enunciado (slide 27) diz que este campo
+            //existe precisamente "to allow for additional checks regarding data
+            //integrity". Sem este check, um k maior leria lixo do buffer.
+            if (k != size - 3) {
+                printf("Error: DATA packet size mismatch (declared k=%d, got %d)\n", k, size - 3);
+                fclose(file);
+                return -1;
+            }
             fwrite(packet + 3, 1, k, file);
             bytesReceived += k;
             printf("DATA received (%d bytes, total %ld/%ld)\n", k, bytesReceived, fileSize);
         }
         else if (packet[0] == C_END) {
             printf("END received\n");
-            //validamos que o tamanho recebido bate certo
+            //validamos integridade: o END repete os TLV do START e nessa altura
+            //ja devemos ter recebido exactamente fileSize bytes. Qualquer
+            //discrepancia significa que a transferencia esta errada.
+            //"File integrity" e um criterio de avaliacao (slide 32).
             long endSize = 0;
             char endName[256] = {0};
             parseControlPacket(packet, size, &endSize, endName);
             if (endSize != fileSize) {
-                printf("Warning: END size (%ld) does not match START size (%ld)\n", endSize, fileSize);
+                printf("Error: END size (%ld) != START size (%ld)\n", endSize, fileSize);
+                fclose(file);
+                return -1;
+            }
+            if (bytesReceived != fileSize) {
+                printf("Error: received %ld bytes, expected %ld\n", bytesReceived, fileSize);
+                fclose(file);
+                return -1;
             }
             break;
         }

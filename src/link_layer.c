@@ -237,6 +237,16 @@ int llOpenRx(LinkLayer llParameters)
 
     stats_reset();
 
+    //instalamos o handler do SIGALRM aqui tambem porque o llCloseRx usa alarme
+    //quando envia o seu DISC e espera o UA final. Sem este handler, o default
+    //POSIX do SIGALRM e terminar o processo ("Alarm clock") — matava o Rx.
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1) {
+        perror("sigaction");
+        exit(1);
+    }
+
     printf("Serial port %s opened\n", llParameters.serialPort);
 
     // Read from serial port until the 'z' char is received.
@@ -401,6 +411,13 @@ int llReceive(unsigned char *packet)
     int escaped = 0;
     int size = 0;
 
+    //scratch interno. A camada de aplicacao nao conhece nem o BCC2 nem o
+    //stuffing, por isso destuffamos e guardamos aqui ate o frame estar validado.
+    //So no fim e que copiamos o payload (sem BCC2) para o buffer do utilizador.
+    //Isto cumpre o criterio "Layer independency" do enunciado (slide 29/32).
+    //O +1 e para caber o BCC2 que fica como ultimo byte deste buffer.
+    unsigned char scratch[MAX_PAYLOAD_SIZE + 1];
+
     //resposta esperada depende do N(s) que esperamos receber
     unsigned char rr_ok, rr_dup, rej;
     if (rx_expected == 0) { rr_ok = 0xAB; rr_dup = 0xAA; rej = 0x54; }
@@ -440,11 +457,11 @@ int llReceive(unsigned char *packet)
                 //fim de frame, o ultimo byte guardado e o BCC2
                 if (size == 0) { estado = R_START; continue; }
 
-                unsigned char bcc2_recv = packet[size - 1];
+                unsigned char bcc2_recv = scratch[size - 1];
                 int dataLen = size - 1;
 
                 unsigned char bcc2_calc = 0x00;
-                for (int i = 0; i < dataLen; i++) bcc2_calc ^= packet[i];
+                for (int i = 0; i < dataLen; i++) bcc2_calc ^= scratch[i];
 
                 unsigned char Ns;
                 if (C == 0x00) Ns = 0;
@@ -484,6 +501,10 @@ int llReceive(unsigned char *packet)
                         //alteramos o rx_expected para a proxima frame
                         if (rx_expected == 1) rx_expected--;
                         else rx_expected++;
+                        //so agora copiamos o payload (ja sem BCC2) para o buffer
+                        //que vem da aplicacao. Assim o utilizador so precisa de
+                        //alocar MAX_PAYLOAD_SIZE e nao sabe nada sobre o BCC2.
+                        for (int i = 0; i < dataLen; i++) packet[i] = scratch[i];
                         return dataLen;
                     }
                     else {
@@ -501,13 +522,21 @@ int llReceive(unsigned char *packet)
                 escaped = 1;
             }
             else {
+                //bound check: nunca podemos escrever para la do scratch.
+                //Se um frame com ruido mantiver R_DATA aberto para sempre,
+                //descartamos em vez de corromper memoria.
+                if (size >= MAX_PAYLOAD_SIZE + 1) {
+                    estado = R_START;
+                    escaped = 0;
+                    continue;
+                }
                 if (escaped) {
-                    if (byte == 0x5E) packet[size] = 0x7E;
-                    else if (byte == 0x5D) packet[size] = 0x7D;
-                    else packet[size] = byte;
+                    if (byte == 0x5E) scratch[size] = 0x7E;
+                    else if (byte == 0x5D) scratch[size] = 0x7D;
+                    else scratch[size] = byte;
                     escaped = 0;
                 }
-                else packet[size] = byte;
+                else scratch[size] = byte;
                 size++;
             }
         }
