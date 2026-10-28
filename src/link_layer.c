@@ -88,8 +88,6 @@ int maquinadeestados(unsigned char A, int with_alarm) {
     while ( (alarmEnabled == TRUE || !with_alarm) && estado != S_DONE) {
         if (readByteSerialPort(&byte) <= 0) continue;
 
-        printf("Byte received: 0x%02X\n", byte);
-
         if (estado == S_START) {
             if (byte == 0x7E) estado = S_FLAG;
         }
@@ -403,7 +401,10 @@ static int rx_expected = 0;
 
 int llReceive(unsigned char *packet)
 {
-    typedef enum { R_START, R_FLAG, R_A, R_C, R_BCC1, R_DATA, R_DONE } EstadoR;
+    //R_SET_END trata o caso em que o Tx reenvia o SET porque o UA inicial se
+    //perdeu. Nessa altura o Rx ja esta em llReceive e tem de reconhecer o SET
+    //duplicado para voltar a enviar o UA, caso contrario o Tx desiste.
+    typedef enum { R_START, R_FLAG, R_A, R_C, R_BCC1, R_DATA, R_SET_END, R_DONE } EstadoR;
     EstadoR estado = R_START;
 
     unsigned char byte;
@@ -426,8 +427,6 @@ int llReceive(unsigned char *packet)
     while (estado != R_DONE) {
         if (readByteSerialPort(&byte) <= 0) continue;
 
-        printf("Byte received: 0x%02X\n", byte);
-
         if (estado == R_START) {
             if (byte == 0x7E) estado = R_FLAG;
         }
@@ -436,21 +435,34 @@ int llReceive(unsigned char *packet)
             else if (byte != 0x7E) estado = R_START;
         }
         else if (estado == R_A) {
-            //guardamos o C para saber se e I0 ou I1
+            //guardamos o C para saber se e I0, I1 ou SET duplicado
             C = byte;
-            if (C == 0x00 || C == 0x80) estado = R_C;
+            if (C == 0x00 || C == 0x80 || C == 0x03) estado = R_C;
             else if (byte == 0x7E) estado = R_FLAG;
             else estado = R_START;
         }
         else if (estado == R_C) {
             if (byte == (0x03 ^ C)) {
-                //header ok, comecamos a ler dados
-                estado = R_DATA;
-                size = 0;
-                escaped = 0;
+                //header ok. Se for SET (C=0x03) nao ha dados, so a flag final.
+                if (C == 0x03) estado = R_SET_END;
+                else {
+                    estado = R_DATA;
+                    size = 0;
+                    escaped = 0;
+                }
             }
             else if (byte == 0x7E) estado = R_FLAG;
             else estado = R_START;
+        }
+        else if (estado == R_SET_END) {
+            //SET duplicado completo: significa que o UA do llOpenRx se perdeu.
+            //Reenviamos UA (A=0x03, C=0x07) para o Tx conseguir sair do llOpenTx.
+            if (byte == 0x7E) {
+                unsigned char ua[5] = {0x7E, 0x03, 0x07, 0x03 ^ 0x07, 0x7E};
+                writeBytesSerialPort(ua, 5);
+                stat_sent[3]++; //UA
+            }
+            estado = R_START;
         }
         else if (estado == R_DATA) {
             if (byte == 0x7E) {
