@@ -122,8 +122,6 @@ void alarmHandler(int signal)
     alarmEnabled = FALSE;
     alarmCount++;
     stat_timeouts++;
-
-    printf("Alarm #%d received\n", alarmCount);
 }
 
 
@@ -605,6 +603,9 @@ int llCloseTx()
             stat_sent[3]++; //UA
 
             stats_print("Tx");
+
+            //espera que o UA seja enviado antes de repor as definicoes da porta
+            sleep(1);
 
             if (closeSerialPort() < 0)
             {

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 //C para control packets
 #define C_START 1
@@ -20,7 +21,13 @@
 
 //tamanho maximo do fragmento do ficheiro dentro de um data packet
 //MAX_PAYLOAD_SIZE menos os 3 bytes do header do data packet (C, L2, L1)
+//(pode ser alterado ao compilar, ex.: -DMAX_CHUNK=200, para o estudo da eficiencia)
+#ifndef MAX_CHUNK
 #define MAX_CHUNK (MAX_PAYLOAD_SIZE - 3)
+#endif
+#if MAX_CHUNK < 1 || MAX_CHUNK > (MAX_PAYLOAD_SIZE - 3)
+#error "MAX_CHUNK tem de estar entre 1 e MAX_PAYLOAD_SIZE - 3"
+#endif
 
 ////////////////////////////////////////////////
 // TX
@@ -65,13 +72,17 @@ static int sendControlPacket(unsigned char c, long fileSize, const char *filenam
     }
 
     //TLV do nome do ficheiro
-    int nameLen = (int)strlen(filename);
+    //enviamos so o nome base (sem diretorias) e no maximo 255 bytes
+    const char *base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+    int nameLen = (int)strlen(base);
+    if (nameLen > 255) nameLen = 255;
     packet[packet_size] = T_NAME;
     packet_size++;
     packet[packet_size] = (unsigned char)nameLen;
     packet_size++;
     for (int i = 0; i < nameLen; i++) {
-        packet[packet_size] = (unsigned char)filename[i];
+        packet[packet_size] = (unsigned char)base[i];
         packet_size++;
     }
 
@@ -96,7 +107,7 @@ static int sendDataPacket(const unsigned char *data, int dataSize)
     return 0;
 }
 
-static int runTx(const char *filename)
+static int runTx(const char *filename, int baudRate)
 {
     //abrimos o ficheiro em modo binario
     FILE *file = fopen(filename, "rb");
@@ -110,6 +121,10 @@ static int runTx(const char *filename)
     long fileSize = ftell(file);
     fseek(file, 0, SEEK_SET);
     printf("File %s has %ld bytes\n", filename, fileSize);
+
+    //medimos o tempo de transferencia (START ate END)
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
     //enviamos o start packet
     if (sendControlPacket(C_START, fileSize, filename) < 0) {
@@ -149,6 +164,15 @@ static int runTx(const char *filename)
         return -1;
     }
     printf("END sent\n");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    //R = debito obtido (bit/s), S = R / C (eficiencia)
+    double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    if (elapsed > 0) {
+        double R = (fileSize * 8.0) / elapsed;
+        printf("Transfer time: %.3f s | R = %.1f bit/s | S = R/C = %.4f (C = %d, fragment = %d bytes)\n",
+               elapsed, R, R / baudRate, baudRate, MAX_CHUNK);
+    }
 
     fclose(file);
     return 0;
@@ -287,7 +311,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         }
         printf("Connection established (Tx)\n");
 
-        if (runTx(filename) < 0) {
+        if (runTx(filename, baudRate) < 0) {
             printf("Transfer failed\n");
         }
 
